@@ -10,6 +10,7 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 ADMIN_HASH = os.environ.get("ADMIN_HASH", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 users_db = {}
 tokens_db = {}
@@ -57,19 +58,55 @@ def verify_token():
     if token in tokens_db: return jsonify({"valid": True, "role": tokens_db[token]["role"]})
     return jsonify({"valid": False}), 401
 
+# ==========================================
+# YANGI QO'SHILDI: ADMIN STATISTIKA
+# ==========================================
+@app.route('/api/admin/stats', methods=['POST'])
+def admin_stats():
+    data = request.json
+    token = data.get('token')
+    
+    # Faqat admin rolidagi odamga ruxsat berish
+    if token in tokens_db and tokens_db[token]["role"] == "admin":
+        return jsonify({
+            "success": True,
+            "total_users": len(users_db),
+            "online_users": len(tokens_db),
+            "users": list(users_db.keys())
+        })
+    return jsonify({"error": "Ruxsat yo'q!"}), 403
+# ==========================================
+
 @app.route('/api/chat', methods=['POST'])
 def chat():
     data = request.json
     message = data.get('message')
     sys_prompt = data.get('systemPrompt', 'Sen foydali AI yordamchisan.')
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {"contents": [{"role": "user", "parts": [{"text": message}]}], "systemInstruction": {"parts": [{"text": sys_prompt}]}}
-    try:
-        res = requests.post(url, json=payload)
-        reply = res.json()['candidates'][0]['content']['parts'][0]['text']
-        return jsonify({"success": True, "reply": reply})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+
+    if OPENROUTER_API_KEY:
+        try:
+            response = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "google/gemini-2.0-flash-exp:free", "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": message}]},
+                timeout=30
+            )
+            if response.status_code == 200:
+                reply = response.json()['choices'][0]['message']['content']
+                return jsonify({"success": True, "reply": reply, "provider": "OpenRouter"})
+        except Exception as e:
+            print(f"OpenRouter xatosi: {e}")
+
+    if GEMINI_API_KEY:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            payload = {"contents": [{"role": "user", "parts": [{"text": message}]}], "systemInstruction": {"parts": [{"text": sys_prompt}]}}
+            res = requests.post(url, json=payload)
+            reply = res.json()['candidates'][0]['content']['parts'][0]['text']
+            return jsonify({"success": True, "reply": reply, "provider": "Gemini"})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "Hech qanday AI kaliti topilmadi"}), 500
 
 @app.route('/api/ai-login', methods=['POST'])
 def ai_login():
