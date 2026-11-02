@@ -16,9 +16,6 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 users_db = {}
 tokens_db = {}
 
-# ==========================================
-# ASOSIY VA LOGIN QISMLARI
-# ==========================================
 @app.route('/')
 def home():
     return "Blip Flask Backend ishlayapti! 🚀"
@@ -67,17 +64,9 @@ def admin_stats():
     data = request.json
     token = data.get('token')
     if token in tokens_db and tokens_db[token]["role"] == "admin":
-        return jsonify({
-            "success": True,
-            "total_users": len(users_db),
-            "online_users": len(tokens_db),
-            "users": list(users_db.keys())
-        })
+        return jsonify({"success": True, "total_users": len(users_db), "online_users": len(tokens_db), "users": list(users_db.keys())})
     return jsonify({"error": "Ruxsat yo'q!"}), 403
 
-# ==========================================
-# AI CHAT VA IMTOHON
-# ==========================================
 @app.route('/api/chat', methods=['POST'])
 def chat():
     data = request.json
@@ -89,32 +78,38 @@ def chat():
             response = requests.post(
                 url="https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
-                json={"model": "google/gemini-2.0-flash-exp:free", "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": message}]},
+                json={"model": "meta-llama/llama-3.1-8b-instruct:free", "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": message}]},
                 timeout=30
             )
             if response.status_code == 200:
                 reply = response.json()['choices'][0]['message']['content']
                 return jsonify({"success": True, "reply": reply, "provider": "OpenRouter"})
+            else:
+                print(f"OpenRouter xatosi: {response.status_code} - {response.text}")
         except Exception as e:
-            print(f"OpenRouter xatosi: {e}")
+            print(f"OpenRouter tarmoq xatosi: {e}")
 
     if GEMINI_API_KEY:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
             payload = {"contents": [{"role": "user", "parts": [{"text": message}]}], "systemInstruction": {"parts": [{"text": sys_prompt}]}}
             res = requests.post(url, json=payload)
-            reply = res.json()['candidates'][0]['content']['parts'][0]['text']
-            return jsonify({"success": True, "reply": reply, "provider": "Gemini"})
+            if res.status_code == 200:
+                reply = res.json()['candidates'][0]['content']['parts'][0]['text']
+                return jsonify({"success": True, "reply": reply, "provider": "Gemini"})
+            else:
+                return jsonify({"error": f"Gemini xatosi: {res.status_code} - {res.text}"}), 500
         except Exception as e:
             return jsonify({"error": str(e)}), 500
-    return jsonify({"error": "Hech qanday AI kaliti topilmadi"}), 500
+            
+    return jsonify({"error": "AI kalitlari ishlamayapti. OpenRouter va Gemini bo'sh."}), 500
 
 @app.route('/api/ai-login', methods=['POST'])
 def ai_login():
     data = request.json
     answers = data.get('answers', [])
     if len(answers) < 30: return jsonify({"error": "30 ta savolga javob bering"}), 400
-    prompt = f"Sen imtihon tekshiruvchisisan. AI 30 ta savolga javob berdi: {answers}. Agar mantiqan to'g'ri va AI darajasida bo'lsa 'PASS', aks holda 'FAIL' deb yoz."
+    prompt = f"Sen imtihon tekshiruvchisisan. AI 30 ta savolga javob berdi: {answers}. Agar mantiqan to'g'ri bo'lsa 'PASS', aks holda 'FAIL' deb yoz."
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     try:
         res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
@@ -127,43 +122,18 @@ def ai_login():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ==========================================
-# YANGI QIDIRUV TIZIMI (DDGS KUTUBXONASI BILAN)
-# ==========================================
 @app.route('/api/search', methods=['GET'])
 def search():
     query = request.args.get("q", "").strip()
-    
-    if len(query) < 2:
-        return jsonify({"success": False, "error": "Kamida 2 ta belgi kiriting."}), 400
-    if len(query) > 200:
-        return jsonify({"success": False, "error": "Qidiruv matni juda uzun."}), 400
-
+    if len(query) < 2: return jsonify({"success": False, "error": "Kamida 2 ta belgi kiriting."}), 400
+    if len(query) > 200: return jsonify({"success": False, "error": "Juda uzun."}), 400
     try:
-        # ddgs kutubxonasi orqali qidirish (DuckDuckGo bloklarini chetlab o'tadi)
         with DDGS() as ddgs:
             raw_results = ddgs.text(query, max_results=10)
-            results = []
-            for item in raw_results:
-                results.append({
-                    "title": item.get("title", ""),
-                    "url": item.get("href", ""),
-                    "snippet": item.get("body", "")
-                })
-                
-        return jsonify({
-            "success": True, 
-            "query": query, 
-            "results": results
-        })
+            results = [{"title": item.get("title", ""), "url": item.get("href", ""), "snippet": item.get("body", "")} for item in raw_results]
+        return jsonify({"success": True, "query": query, "results": results})
     except Exception as e:
-        return jsonify({
-            "success": False, 
-            "error": f"Qidiruv xizmati vaqtincha ishlamayapti. Xato: {str(e)}"
-        }), 502
+        return jsonify({"success": False, "error": str(e)}), 502
 
-# ==========================================
-# SERVERNI ISHGA TUSHIRISH
-# ==========================================
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
