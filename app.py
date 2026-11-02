@@ -4,8 +4,7 @@ import os
 import hashlib
 import uuid
 import requests
-from html.parser import HTMLParser
-from urllib.parse import urlparse, parse_qs, unquote
+from ddgs import DDGS
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -129,72 +128,39 @@ def ai_login():
         return jsonify({"error": str(e)}), 500
 
 # ==========================================
-# YANGI QIDIRUV TIZIMI (DUCKDUCKGO)
+# YANGI QIDIRUV TIZIMI (DDGS KUTUBXONASI BILAN)
 # ==========================================
-class DDGParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.results = []
-        self.current = None
-        self.capture = None
-
-    def handle_starttag(self, tag, attrs):
-        attrs = dict(attrs)
-        classes = attrs.get("class", "").split()
-
-        if tag == "a" and "result__a" in classes:
-            self.current = {"title": "", "url": attrs.get("href", ""), "snippet": ""}
-            self.capture = "title"
-        elif self.current and "result__snippet" in classes:
-            self.capture = "snippet"
-
-    def handle_data(self, data):
-        if self.current and self.capture:
-            self.current[self.capture] += data
-
-    def handle_endtag(self, tag):
-        if tag == "a" and self.current and self.capture == "title":
-            self.capture = None
-        if tag in ("a", "div") and self.current:
-            if self.current["title"].strip() and self.current["url"]:
-                if len(self.results) < 10:
-                    self.results.append(self.current)
-                self.current = None
-                self.capture = None
-
 @app.route('/api/search', methods=['GET'])
 def search():
     query = request.args.get("q", "").strip()
+    
     if len(query) < 2:
         return jsonify({"success": False, "error": "Kamida 2 ta belgi kiriting."}), 400
     if len(query) > 200:
         return jsonify({"success": False, "error": "Qidiruv matni juda uzun."}), 400
 
     try:
-        response = requests.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": query},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=15
-        )
-        response.raise_for_status()
-
-        parser = DDGParser()
-        parser.feed(response.text)
-        results = []
-
-        for item in parser.results:
-            url = item["url"]
-            if url.startswith("//"): url = "https:" + url
-            if "duckduckgo.com/l/" in url:
-                target = parse_qs(urlparse(url).query).get("uddg")
-                if target: url = unquote(target[0])
-            if not url.startswith(("http://", "https://")): continue
-            results.append({"title": item["title"].strip(), "url": url, "snippet": item["snippet"].strip()})
-
-        return jsonify({"success": True, "query": query, "results": results})
-    except Exception:
-        return jsonify({"success": False, "error": "Qidiruv xizmati vaqtincha ishlamayapti."}), 502
+        # ddgs kutubxonasi orqali qidirish (DuckDuckGo bloklarini chetlab o'tadi)
+        with DDGS() as ddgs:
+            raw_results = ddgs.text(query, max_results=10)
+            results = []
+            for item in raw_results:
+                results.append({
+                    "title": item.get("title", ""),
+                    "url": item.get("href", ""),
+                    "snippet": item.get("body", "")
+                })
+                
+        return jsonify({
+            "success": True, 
+            "query": query, 
+            "results": results
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False, 
+            "error": f"Qidiruv xizmati vaqtincha ishlamayapti. Xato: {str(e)}"
+        }), 502
 
 # ==========================================
 # SERVERNI ISHGA TUSHIRISH
