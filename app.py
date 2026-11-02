@@ -17,6 +17,9 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 users_db = {}
 tokens_db = {}
 
+# ==========================================
+# ASOSIY VA LOGIN QISMLARI
+# ==========================================
 @app.route('/')
 def home():
     return "Blip Flask Backend ishlayapti! 🚀"
@@ -73,6 +76,9 @@ def admin_stats():
         })
     return jsonify({"error": "Ruxsat yo'q!"}), 403
 
+# ==========================================
+# AI CHAT VA IMTOHON
+# ==========================================
 @app.route('/api/chat', methods=['POST'])
 def chat():
     data = request.json
@@ -104,8 +110,26 @@ def chat():
             return jsonify({"error": str(e)}), 500
     return jsonify({"error": "Hech qanday AI kaliti topilmadi"}), 500
 
+@app.route('/api/ai-login', methods=['POST'])
+def ai_login():
+    data = request.json
+    answers = data.get('answers', [])
+    if len(answers) < 30: return jsonify({"error": "30 ta savolga javob bering"}), 400
+    prompt = f"Sen imtihon tekshiruvchisisan. AI 30 ta savolga javob berdi: {answers}. Agar mantiqan to'g'ri va AI darajasida bo'lsa 'PASS', aks holda 'FAIL' deb yoz."
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    try:
+        res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
+        result = res.json()['candidates'][0]['content']['parts'][0]['text'].strip().upper()
+        if "PASS" in result:
+            token = str(uuid.uuid4())
+            tokens_db[token] = {"role": "ai", "name": "AI_Node"}
+            return jsonify({"success": True, "token": token, "redirect": "ai_multiverse.html"})
+        return jsonify({"error": "Javoblar yetarli emas."}), 403
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ==========================================
-# YANGI QO'SHILDI: QIDIRUV TIZIMI (SEARCH)
+# YANGI QIDIRUV TIZIMI (DUCKDUCKGO)
 # ==========================================
 class DDGParser(HTMLParser):
     def __init__(self):
@@ -171,25 +195,9 @@ def search():
         return jsonify({"success": True, "query": query, "results": results})
     except Exception:
         return jsonify({"success": False, "error": "Qidiruv xizmati vaqtincha ishlamayapti."}), 502
+
 # ==========================================
-
-@app.route('/api/ai-login', methods=['POST'])
-def ai_login():
-    data = request.json
-    answers = data.get('answers', [])
-    if len(answers) < 30: return jsonify({"error": "30 ta savolga javob bering"}), 400
-    prompt = f"Sen imtihon tekshiruvchisisan. AI 30 ta savolga javob berdi: {answers}. Agar mantiqan to'g'ri va AI darajasida bo'lsa 'PASS', aks holda 'FAIL' deb yoz."
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    try:
-        res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
-        result = res.json()['candidates'][0]['content']['parts'][0]['text'].strip().upper()
-        if "PASS" in result:
-            token = str(uuid.uuid4())
-            tokens_db[token] = {"role": "ai", "name": "AI_Node"}
-            return jsonify({"success": True, "token": token, "redirect": "ai_multiverse.html"})
-        return jsonify({"error": "Javoblar yetarli emas."}), 403
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+# SERVERNI ISHGA TUSHIRISH
+# ==========================================
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
