@@ -4,6 +4,8 @@ import os
 import hashlib
 import uuid
 import requests
+from html.parser import HTMLParser
+from urllib.parse import urlparse, parse_qs, unquote
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -58,15 +60,10 @@ def verify_token():
     if token in tokens_db: return jsonify({"valid": True, "role": tokens_db[token]["role"]})
     return jsonify({"valid": False}), 401
 
-# ==========================================
-# YANGI QO'SHILDI: ADMIN STATISTIKA
-# ==========================================
 @app.route('/api/admin/stats', methods=['POST'])
 def admin_stats():
     data = request.json
     token = data.get('token')
-    
-    # Faqat admin rolidagi odamga ruxsat berish
     if token in tokens_db and tokens_db[token]["role"] == "admin":
         return jsonify({
             "success": True,
@@ -75,7 +72,6 @@ def admin_stats():
             "users": list(users_db.keys())
         })
     return jsonify({"error": "Ruxsat yo'q!"}), 403
-# ==========================================
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
@@ -107,6 +103,75 @@ def chat():
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     return jsonify({"error": "Hech qanday AI kaliti topilmadi"}), 500
+
+# ==========================================
+# YANGI QO'SHILDI: QIDIRUV TIZIMI (SEARCH)
+# ==========================================
+class DDGParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.results = []
+        self.current = None
+        self.capture = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        classes = attrs.get("class", "").split()
+
+        if tag == "a" and "result__a" in classes:
+            self.current = {"title": "", "url": attrs.get("href", ""), "snippet": ""}
+            self.capture = "title"
+        elif self.current and "result__snippet" in classes:
+            self.capture = "snippet"
+
+    def handle_data(self, data):
+        if self.current and self.capture:
+            self.current[self.capture] += data
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self.current and self.capture == "title":
+            self.capture = None
+        if tag in ("a", "div") and self.current:
+            if self.current["title"].strip() and self.current["url"]:
+                if len(self.results) < 10:
+                    self.results.append(self.current)
+                self.current = None
+                self.capture = None
+
+@app.route('/api/search', methods=['GET'])
+def search():
+    query = request.args.get("q", "").strip()
+    if len(query) < 2:
+        return jsonify({"success": False, "error": "Kamida 2 ta belgi kiriting."}), 400
+    if len(query) > 200:
+        return jsonify({"success": False, "error": "Qidiruv matni juda uzun."}), 400
+
+    try:
+        response = requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15
+        )
+        response.raise_for_status()
+
+        parser = DDGParser()
+        parser.feed(response.text)
+        results = []
+
+        for item in parser.results:
+            url = item["url"]
+            if url.startswith("//"): url = "https:" + url
+            if "duckduckgo.com/l/" in url:
+                target = parse_qs(urlparse(url).query).get("uddg")
+                if target: url = unquote(target[0])
+            if not url.startswith(("http://", "https://")): continue
+            results.append({"title": item["title"].strip(), "url": url, "snippet": item["snippet"].strip()})
+
+        return jsonify({"success": True, "query": query, "results": results})
+    except Exception:
+        return jsonify({"success": False, "error": "Qidiruv xizmati vaqtincha ishlamayapti."}), 502
+# ==========================================
 
 @app.route('/api/ai-login', methods=['POST'])
 def ai_login():
