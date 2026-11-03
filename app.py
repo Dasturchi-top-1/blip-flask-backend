@@ -6,75 +6,90 @@ import uuid
 import requests
 import time
 from ddgs import DDGS
+from supabase import create_client, Client
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
 ADMIN_HASH = os.environ.get("ADMIN_HASH", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
-users_db = {}
 tokens_db = {}
 
-# ==========================================
-# RETRY MEXANIZMI (503/429 xatolar uchun)
-# ==========================================
+@app.route('/')
+def home():
+    status = "Supabase ulangan ✅" if supabase else "Supabase ULANMAGAN ❌"
+    return f"Blip Flask Backend ishlayapti! 🚀 ({status})"
+
 def make_request_with_retry(url, headers, json_data, max_retries=3):
-    """503 yoki 429 xatosida so'rovni qayta yuboradi."""
     for attempt in range(max_retries):
         try:
             response = requests.post(url, headers=headers, json=json_data, timeout=30)
             if response.status_code in [200, 201]:
                 return response
             if response.status_code in [503, 429]:
-                wait_time = 2 ** attempt  # 2, 4, 8 soniya
-                print(f"⚠️ {response.status_code} xatosi. {wait_time} soniyadan keyin qayta urinish ({attempt+1}/{max_retries})...")
-                time.sleep(wait_time)
+                time.sleep(2 ** attempt)
                 continue
             return response
         except Exception as e:
-            print(f"Tarmoq xatosi (urinish {attempt+1}): {e}")
             if attempt == max_retries - 1:
                 raise
             time.sleep(2 ** attempt)
     return response
 
-@app.route('/')
-def home():
-    return "Blip Flask Backend ishlayapti! 🚀"
-
 @app.route('/api/register', methods=['POST'])
 def register():
     data = request.json
-    username = data.get('username', '').lower()
+    username = data.get('username', '').strip().lower()
     password = data.get('password', '')
+
     if not username or not password: return jsonify({"error": "Ism va parol kerak"}), 400
     if len(username) < 3: return jsonify({"error": "Ism kamida 3 harf"}), 400
-    if username in users_db: return jsonify({"error": "Bu ism band!"}), 400
-    hashed = hashlib.sha256(password.encode()).hexdigest()
-    users_db[username] = {"password": hashed, "role": "human"}
-    return jsonify({"success": True, "message": "Ro'yxatdan o'tdingiz!"})
+    if not supabase: return jsonify({"error": "Ma'lumotlar bazasi ulanmagan"}), 500
+
+    try:
+        existing = supabase.table("users").select("id").eq("username", username).execute()
+        if existing.data and len(existing.data) > 0:
+            return jsonify({"error": "Bu ism band!"}), 400
+
+        hashed = hashlib.sha256(password.encode()).hexdigest()
+        supabase.table("users").insert({"username": username, "password_hash": hashed, "role": "human"}).execute()
+        return jsonify({"success": True, "message": "Ro'yxatdan o'tdingiz!"})
+    except Exception as e:
+        return jsonify({"error": f"Baza xatosi: {str(e)}"}), 500
 
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json
-    username = data.get('username', '').lower()
+    username = data.get('username', '').strip().lower()
     password = data.get('password', '')
+
     if not username or not password: return jsonify({"error": "Ism va parolni kiriting"}), 400
     hashed = hashlib.sha256(password.encode()).hexdigest()
-    
+
     if username == "admin" and hashed == ADMIN_HASH:
         token = str(uuid.uuid4())
         tokens_db[token] = {"role": "admin", "name": "Admin"}
         return jsonify({"success": True, "token": token, "role": "admin", "redirect": "multiverse.html"})
-        
-    user = users_db.get(username)
-    if user and user["password"] == hashed:
-        token = str(uuid.uuid4())
-        tokens_db[token] = {"role": "human", "name": username}
-        return jsonify({"success": True, "token": token, "role": "human", "redirect": "multiverse.html"})
-    return jsonify({"error": "Ism yoki parol xato!"}), 401
+
+    if not supabase: return jsonify({"error": "Ma'lumotlar bazasi ulanmagan"}), 500
+
+    try:
+        result = supabase.table("users").select("*").eq("username", username).execute()
+        if result.data and len(result.data) > 0:
+            user = result.data[0]
+            if user["password_hash"] == hashed:
+                token = str(uuid.uuid4())
+                tokens_db[token] = {"role": "human", "name": username}
+                return jsonify({"success": True, "token": token, "role": "human", "redirect": "multiverse.html"})
+        return jsonify({"error": "Ism yoki parol xato!"}), 401
+    except Exception as e:
+        return jsonify({"error": f"Baza xatosi: {str(e)}"}), 500
 
 @app.route('/api/verify-token', methods=['POST'])
 def verify_token():
@@ -87,60 +102,47 @@ def verify_token():
 def admin_stats():
     data = request.json
     token = data.get('token')
-    if token in tokens_db and tokens_db[token]["role"] == "admin":
-        return jsonify({"success": True, "total_users": len(users_db), "online_users": len(tokens_db), "users": list(users_db.keys())})
-    return jsonify({"error": "Ruxsat yo'q!"}), 403
+    if token not in tokens_db or tokens_db[token]["role"] != "admin":
+        return jsonify({"error": "Ruxsat yo'q!"}), 403
+    if not supabase: return jsonify({"error": "Baza ulanmagan"}), 500
 
-# ==========================================
-# AI CHAT (Retry bilan)
-# ==========================================
+    try:
+        result = supabase.table("users").select("username").execute()
+        users_list = [u["username"] for u in result.data] if result.data else []
+        return jsonify({"success": True, "total_users": len(users_list), "online_users": len(tokens_db), "users": users_list})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/chat', methods=['POST'])
 def chat():
     data = request.json
     message = data.get('message')
     sys_prompt = data.get('systemPrompt', 'Sen foydali AI yordamchisan.')
 
-    # 1. OpenRouter (ishonchliroq bepul model)
     if OPENROUTER_API_KEY:
         try:
-            payload = {
-                "model": "nvidia/nemotron-3.5-super-vl:free",  # Yangilangan model
-                "messages": [
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": message}
-                ]
-            }
+            payload = {"model": "nvidia/nemotron-3.5-super-vl:free", "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": message}]}
             headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
             response = make_request_with_retry("https://openrouter.ai/api/v1/chat/completions", headers, payload)
-            
             if response.status_code == 200:
                 reply = response.json()['choices'][0]['message']['content']
                 return jsonify({"success": True, "reply": reply, "provider": "OpenRouter"})
-            else:
-                print(f"OpenRouter xatosi: {response.status_code} - {response.text}")
         except Exception as e:
-            print(f"OpenRouter tarmoq xatosi: {e}")
+            print(f"OpenRouter xatosi: {e}")
 
-    # 2. Gemini (zaxira)
     if GEMINI_API_KEY:
         try:
-            # gemini-2.5-flash ga qaytamiz (3.8-flash ba'zan mavjud emas)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-            payload = {
-                "contents": [{"role": "user", "parts": [{"text": message}]}],
-                "systemInstruction": {"parts": [{"text": sys_prompt}]}
-            }
+            payload = {"contents": [{"role": "user", "parts": [{"text": message}]}], "systemInstruction": {"parts": [{"text": sys_prompt}]}}
             response = make_request_with_retry(url, {}, payload)
-            
             if response.status_code == 200:
                 reply = response.json()['candidates'][0]['content']['parts'][0]['text']
                 return jsonify({"success": True, "reply": reply, "provider": "Gemini"})
             else:
-                return jsonify({"error": f"Gemini xatosi: {response.status_code} - {response.text}"}), 500
+                return jsonify({"error": f"Gemini: {response.status_code}"}), 500
         except Exception as e:
             return jsonify({"error": str(e)}), 500
-            
-    return jsonify({"error": "AI kalitlari ishlamayapti yoki barcha urinishlar muvaffaqiyatsiz."}), 500
+    return jsonify({"error": "AI kalitlari ishlamayapti"}), 500
 
 @app.route('/api/ai-login', methods=['POST'])
 def ai_login():
