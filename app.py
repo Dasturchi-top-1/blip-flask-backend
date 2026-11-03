@@ -26,8 +26,8 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 # Session sozlamalari
 secret = os.environ.get("FLASK_SECRET_KEY")
 if not secret or len(secret) < 32:
-    print("⚠️ OGOHLANTIRISH: FLASK_SECRET_KEY sozlanmagan yoki juda qisqa!")
-    secret = "blip-temporary-fallback-secret-key-please-change-me"
+    print("WARNING: FLASK_SECRET_KEY sozlanmagan yoki juda qisqa!")
+    secret = "blip-temporary-fallback-secret-key-please-change-me-now"
 
 app.secret_key = secret
 app.config.update(
@@ -38,14 +38,16 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(days=7)
 )
 
-# CORS - faqat frontend domeniga ruxsat
+# CORS
 CORS(
     app,
     origins=["https://dasturchi-top-1.github.io"],
     supports_credentials=True
 )
 
-# OAuth sozlamalari
+# ==========================================
+# OAUTH KONFIGURATSIYASI
+# ==========================================
 oauth = OAuth(app)
 
 google = oauth.register(
@@ -90,24 +92,22 @@ def make_request_with_retry(url, headers, json_data, max_retries=3):
 # ==========================================
 @app.route('/')
 def home():
-    status = "Supabase ulangan ✅" if supabase else "Supabase ULANMAGAN ❌"
-    return f"Blip Flask Backend ishlayapti! 🚀 ({status})"
+    status = "Supabase ulangan OK" if supabase else "Supabase ULANMAGAN"
+    oauth_status = "OAuth tayyor" if os.environ.get("GOOGLE_CLIENT_ID") else "OAuth sozlanmagan"
+    return f"Blip Flask Backend ishlayapti! ({status}) ({oauth_status})"
 
 @app.route('/api/register', methods=['POST'])
 def register():
     data = request.json
     username = data.get('username', '').strip().lower()
     password = data.get('password', '')
-
     if not username or not password: return jsonify({"error": "Ism va parol kerak"}), 400
     if len(username) < 3: return jsonify({"error": "Ism kamida 3 harf"}), 400
     if not supabase: return jsonify({"error": "Ma'lumotlar bazasi ulanmagan"}), 500
-
     try:
         existing = supabase.table("users").select("id").eq("username", username).execute()
         if existing.data and len(existing.data) > 0:
             return jsonify({"error": "Bu ism band!"}), 400
-
         hashed = hashlib.sha256(password.encode()).hexdigest()
         supabase.table("users").insert({"username": username, "password_hash": hashed, "role": "human"}).execute()
         return jsonify({"success": True, "message": "Ro'yxatdan o'tdingiz!"})
@@ -119,11 +119,9 @@ def login():
     data = request.json
     username = data.get('username', '').strip().lower()
     password = data.get('password', '')
-
     if not username or not password: return jsonify({"error": "Ism va parolni kiriting"}), 400
     hashed = hashlib.sha256(password.encode()).hexdigest()
 
-    # Admin tekshiruvi
     if username == "admin" and hashed == ADMIN_HASH:
         session.clear()
         session["user_id"] = "admin"
@@ -132,12 +130,10 @@ def login():
         return jsonify({"success": True, "role": "admin", "redirect": "multiverse.html"})
 
     if not supabase: return jsonify({"error": "Ma'lumotlar bazasi ulanmagan"}), 500
-
     try:
         result = supabase.table("users").select("*").eq("username", username).execute()
         if result.data and len(result.data) > 0:
             user = result.data[0]
-            # OAuth foydalanuvchilari uchun password_hash NULL bo'lishi mumkin
             if not user.get("password_hash"):
                 return jsonify({"error": "Bu hisob OAuth orqali yaratilgan. Google yoki GitHub bilan kiring."}), 401
             if user["password_hash"] == hashed:
@@ -154,10 +150,8 @@ def login():
 def verify_token():
     user_id = session.get("user_id")
     if not user_id: return jsonify({"valid": False}), 401
-    
     if user_id == "admin" and session.get("role") == "admin":
         return jsonify({"valid": True, "role": "admin"})
-    
     try:
         result = supabase.table("users").select("role").eq("id", user_id).execute()
         if not result.data:
@@ -171,10 +165,8 @@ def verify_token():
 def current_user():
     user_id = session.get("user_id")
     if not user_id: return jsonify({"success": False, "authenticated": False}), 401
-    
     if user_id == "admin" and session.get("role") == "admin":
         return jsonify({"success": True, "authenticated": True, "role": "admin", "username": "Admin"})
-    
     try:
         result = supabase.table("users").select("id, username, role").eq("id", user_id).execute()
         if not result.data:
@@ -251,6 +243,9 @@ def ai_login():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ==========================================
+# QIDIRUV
+# ==========================================
 @app.route('/api/search', methods=['GET'])
 def search():
     query = request.args.get("q", "").strip()
@@ -337,7 +332,7 @@ def handle_oauth_login(name, email, provider, provider_user_id, email_verified=F
 @app.route("/api/auth/google")
 def auth_google():
     if not os.environ.get("GOOGLE_CLIENT_ID") or not os.environ.get("GOOGLE_CLIENT_SECRET"):
-        return "Google OAuth sozlanmagan", 503
+        return "Google OAuth sozlanmagan (Environment Variables yo'q)", 503
     redirect_uri = url_for("auth_google_callback", _external=True)
     return google.authorize_redirect(redirect_uri)
 
@@ -366,7 +361,7 @@ def auth_google_callback():
 @app.route("/api/auth/github")
 def auth_github():
     if not os.environ.get("GITHUB_CLIENT_ID") or not os.environ.get("GITHUB_CLIENT_SECRET"):
-        return "GitHub OAuth sozlanmagan", 503
+        return "GitHub OAuth sozlanmagan (Environment Variables yo'q)", 503
     redirect_uri = url_for("auth_github_callback", _external=True)
     return github.authorize_redirect(redirect_uri)
 
