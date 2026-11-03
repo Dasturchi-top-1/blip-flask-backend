@@ -4,6 +4,7 @@ import os
 import hashlib
 import uuid
 import requests
+import time
 from ddgs import DDGS
 
 app = Flask(__name__)
@@ -15,6 +16,29 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 users_db = {}
 tokens_db = {}
+
+# ==========================================
+# RETRY MEXANIZMI (503/429 xatolar uchun)
+# ==========================================
+def make_request_with_retry(url, headers, json_data, max_retries=3):
+    """503 yoki 429 xatosida so'rovni qayta yuboradi."""
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, headers=headers, json=json_data, timeout=30)
+            if response.status_code in [200, 201]:
+                return response
+            if response.status_code in [503, 429]:
+                wait_time = 2 ** attempt  # 2, 4, 8 soniya
+                print(f"⚠️ {response.status_code} xatosi. {wait_time} soniyadan keyin qayta urinish ({attempt+1}/{max_retries})...")
+                time.sleep(wait_time)
+                continue
+            return response
+        except Exception as e:
+            print(f"Tarmoq xatosi (urinish {attempt+1}): {e}")
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(2 ** attempt)
+    return response
 
 @app.route('/')
 def home():
@@ -67,20 +91,28 @@ def admin_stats():
         return jsonify({"success": True, "total_users": len(users_db), "online_users": len(tokens_db), "users": list(users_db.keys())})
     return jsonify({"error": "Ruxsat yo'q!"}), 403
 
+# ==========================================
+# AI CHAT (Retry bilan)
+# ==========================================
 @app.route('/api/chat', methods=['POST'])
 def chat():
     data = request.json
     message = data.get('message')
     sys_prompt = data.get('systemPrompt', 'Sen foydali AI yordamchisan.')
 
+    # 1. OpenRouter (ishonchliroq bepul model)
     if OPENROUTER_API_KEY:
         try:
-            response = requests.post(
-                url="https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
-                json={"model": "meta-llama/llama-3.1-8b-instruct:free", "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": message}]},
-                timeout=30
-            )
+            payload = {
+                "model": "nvidia/nemotron-3.5-super-vl:free",  # Yangilangan model
+                "messages": [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": message}
+                ]
+            }
+            headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+            response = make_request_with_retry("https://openrouter.ai/api/v1/chat/completions", headers, payload)
+            
             if response.status_code == 200:
                 reply = response.json()['choices'][0]['message']['content']
                 return jsonify({"success": True, "reply": reply, "provider": "OpenRouter"})
@@ -89,21 +121,26 @@ def chat():
         except Exception as e:
             print(f"OpenRouter tarmoq xatosi: {e}")
 
+    # 2. Gemini (zaxira)
     if GEMINI_API_KEY:
         try:
-            # MODEL YANGILANDI: gemini-3.8-flash
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_API_KEY}"
-            payload = {"contents": [{"role": "user", "parts": [{"text": message}]}], "systemInstruction": {"parts": [{"text": sys_prompt}]}}
-            res = requests.post(url, json=payload)
-            if res.status_code == 200:
-                reply = res.json()['candidates'][0]['content']['parts'][0]['text']
+            # gemini-2.5-flash ga qaytamiz (3.8-flash ba'zan mavjud emas)
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+            payload = {
+                "contents": [{"role": "user", "parts": [{"text": message}]}],
+                "systemInstruction": {"parts": [{"text": sys_prompt}]}
+            }
+            response = make_request_with_retry(url, {}, payload)
+            
+            if response.status_code == 200:
+                reply = response.json()['candidates'][0]['content']['parts'][0]['text']
                 return jsonify({"success": True, "reply": reply, "provider": "Gemini"})
             else:
-                return jsonify({"error": f"Gemini xatosi: {res.status_code} - {res.text}"}), 500
+                return jsonify({"error": f"Gemini xatosi: {response.status_code} - {response.text}"}), 500
         except Exception as e:
             return jsonify({"error": str(e)}), 500
             
-    return jsonify({"error": "AI kalitlari ishlamayapti."}), 500
+    return jsonify({"error": "AI kalitlari ishlamayapti yoki barcha urinishlar muvaffaqiyatsiz."}), 500
 
 @app.route('/api/ai-login', methods=['POST'])
 def ai_login():
@@ -111,11 +148,11 @@ def ai_login():
     answers = data.get('answers', [])
     if len(answers) < 30: return jsonify({"error": "30 ta savolga javob bering"}), 400
     prompt = f"Sen imtihon tekshiruvchisisan. AI 30 ta savolga javob berdi: {answers}. Agar mantiqan to'g'ri bo'lsa 'PASS', aks holda 'FAIL' deb yoz."
-    # MODEL YANGILANDI: gemini-3.8-flash
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     try:
-        res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
-        result = res.json()['candidates'][0]['content']['parts'][0]['text'].strip().upper()
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        response = make_request_with_retry(url, {}, payload)
+        result = response.json()['candidates'][0]['content']['parts'][0]['text'].strip().upper()
         if "PASS" in result:
             token = str(uuid.uuid4())
             tokens_db[token] = {"role": "ai", "name": "AI_Node"}
