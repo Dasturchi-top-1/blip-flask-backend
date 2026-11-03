@@ -91,7 +91,7 @@ def chat():
 
     if GEMINI_API_KEY:
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
             payload = {"contents": [{"role": "user", "parts": [{"text": message}]}], "systemInstruction": {"parts": [{"text": sys_prompt}]}}
             res = requests.post(url, json=payload)
             if res.status_code == 200:
@@ -102,7 +102,7 @@ def chat():
         except Exception as e:
             return jsonify({"error": str(e)}), 500
             
-    return jsonify({"error": "AI kalitlari ishlamayapti. OpenRouter va Gemini bo'sh."}), 500
+    return jsonify({"error": "AI kalitlari ishlamayapti."}), 500
 
 @app.route('/api/ai-login', methods=['POST'])
 def ai_login():
@@ -110,7 +110,7 @@ def ai_login():
     answers = data.get('answers', [])
     if len(answers) < 30: return jsonify({"error": "30 ta savolga javob bering"}), 400
     prompt = f"Sen imtihon tekshiruvchisisan. AI 30 ta savolga javob berdi: {answers}. Agar mantiqan to'g'ri bo'lsa 'PASS', aks holda 'FAIL' deb yoz."
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     try:
         res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
         result = res.json()['candidates'][0]['content']['parts'][0]['text'].strip().upper()
