@@ -6,7 +6,8 @@ import hashlib
 import uuid
 import requests
 import time
-from datetime import timedelta
+import jwt
+from datetime import timedelta, datetime, timezone
 from ddgs import DDGS
 from supabase import create_client, Client
 
@@ -23,11 +24,13 @@ ADMIN_HASH = os.environ.get("ADMIN_HASH", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
-# Session sozlamalari
+JWT_SECRET = os.environ.get("JWT_SECRET")
+if not JWT_SECRET or len(JWT_SECRET) < 32:
+    raise RuntimeError("JWT_SECRET Render Environment'da sozlanmagan yoki juda qisqa!")
+
 secret = os.environ.get("FLASK_SECRET_KEY")
 if not secret or len(secret) < 32:
-    print("WARNING: FLASK_SECRET_KEY sozlanmagan yoki juda qisqa!")
-    secret = "blip-temporary-fallback-secret-key-please-change-me-now"
+    raise RuntimeError("FLASK_SECRET_KEY Render Environment'da sozlanmagan yoki juda qisqa!")
 
 app.secret_key = secret
 app.config.update(
@@ -42,7 +45,9 @@ app.config.update(
 CORS(
     app,
     origins=["https://dasturchi-top-1.github.io"],
-    supports_credentials=True
+    supports_credentials=True,
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "OPTIONS"]
 )
 
 # ==========================================
@@ -71,6 +76,32 @@ github = oauth.register(
 # ==========================================
 # YORDAMCHI FUNKSIYALAR
 # ==========================================
+def create_jwt(user_id, role):
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user_id),
+        "role": str(role),
+        "iat": now,
+        "exp": now + timedelta(minutes=30),
+        "iss": "blip-multiverse"
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+
+def get_jwt_payload():
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return None
+    try:
+        return jwt.decode(
+            auth[7:].strip(), JWT_SECRET,
+            algorithms=["HS256"],
+            issuer="blip-multiverse"
+        )
+    except jwt.InvalidTokenError:
+        return None
+
+
 def make_request_with_retry(url, headers, json_data, max_retries=3):
     for attempt in range(max_retries):
         try:
@@ -86,8 +117,7 @@ def make_request_with_retry(url, headers, json_data, max_retries=3):
                 raise
             time.sleep(2 ** attempt)
     return response
-
-# ==========================================
+    # ==========================================
 # ASOSIY ROUTE'LAR
 # ==========================================
 @app.route('/')
@@ -122,12 +152,15 @@ def login():
     if not username or not password: return jsonify({"error": "Ism va parolni kiriting"}), 400
     hashed = hashlib.sha256(password.encode()).hexdigest()
 
+    # Admin
     if username == "admin" and hashed == ADMIN_HASH:
-        session.clear()
-        session["user_id"] = "admin"
-        session["role"] = "admin"
-        session.permanent = True
-        return jsonify({"success": True, "role": "admin", "redirect": "multiverse.html"})
+        token = create_jwt("admin", "admin")
+        return jsonify({
+            "success": True,
+            "token": token,
+            "role": "admin",
+            "redirect": "multiverse.html"
+        })
 
     if not supabase: return jsonify({"error": "Ma'lumotlar bazasi ulanmagan"}), 500
     try:
@@ -135,16 +168,75 @@ def login():
         if result.data and len(result.data) > 0:
             user = result.data[0]
             if not user.get("password_hash"):
-                return jsonify({"error": "Bu hisob OAuth orqali yaratilgan. Google yoki GitHub bilan kiring."}), 401
+                return jsonify({"error": "OAuth orqali yaratilgan. Google yoki GitHub bilan kiring."}), 401
             if user["password_hash"] == hashed:
-                session.clear()
-                session["user_id"] = user["id"]
-                session["role"] = user.get("role", "human")
-                session.permanent = True
-                return jsonify({"success": True, "role": user.get("role", "human"), "redirect": "multiverse.html"})
+                role = user.get("role", "human")
+                token = create_jwt(user["id"], role)
+                return jsonify({
+                    "success": True,
+                    "token": token,
+                    "role": role,
+                    "redirect": "multiverse.html"
+                })
         return jsonify({"error": "Ism yoki parol xato!"}), 401
     except Exception as e:
         return jsonify({"error": f"Baza xatosi: {str(e)}"}), 500
+
+@app.route("/api/me", methods=["GET"])
+def current_user():
+    # 1. JWT (parol bilan kirganlar)
+    payload = get_jwt_payload()
+    if payload:
+        user_id = payload.get("sub")
+        role = payload.get("role")
+
+        if str(user_id) == "admin":
+            if role != "admin":
+                return jsonify({"success": False, "authenticated": False}), 401
+            return jsonify({"success": True, "authenticated": True,
+                            "role": "admin", "username": "Admin"})
+
+        if not supabase:
+            return jsonify({"error": "Baza ulanmagan"}), 500
+        try:
+            result = supabase.table("users").select("id, username, role").eq("id", user_id).execute()
+            if not result.data:
+                return jsonify({"success": False, "authenticated": False}), 401
+            user = result.data[0]
+            if user.get("role", "human") != role:
+                return jsonify({"success": False, "authenticated": False}), 401
+            return jsonify({
+                "success": True, "authenticated": True,
+                "user_id": user["id"], "username": user["username"],
+                "role": user.get("role", "human")
+            })
+        except Exception:
+            return jsonify({"error": "Server xatosi"}), 500
+
+    # 2. Session (OAuth bilan kirganlar)
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"success": False, "authenticated": False}), 401
+
+    if user_id == "admin" and session.get("role") == "admin":
+        return jsonify({"success": True, "authenticated": True,
+                        "role": "admin", "username": "Admin"})
+
+    if not supabase:
+        return jsonify({"error": "Baza ulanmagan"}), 500
+    try:
+        result = supabase.table("users").select("id, username, role").eq("id", user_id).execute()
+        if not result.data:
+            session.clear()
+            return jsonify({"success": False, "authenticated": False}), 401
+        user = result.data[0]
+        return jsonify({
+            "success": True, "authenticated": True,
+            "user_id": user["id"], "username": user["username"],
+            "role": user.get("role", "human")
+        })
+    except Exception:
+        return jsonify({"error": "Server xatosi"}), 500
 
 @app.route('/api/verify-token', methods=['POST'])
 def verify_token():
@@ -161,26 +253,18 @@ def verify_token():
     except Exception:
         return jsonify({"valid": False}), 500
 
-@app.route("/api/me", methods=["GET"])
-def current_user():
-    user_id = session.get("user_id")
-    if not user_id: return jsonify({"success": False, "authenticated": False}), 401
-    if user_id == "admin" and session.get("role") == "admin":
-        return jsonify({"success": True, "authenticated": True, "role": "admin", "username": "Admin"})
-    try:
-        result = supabase.table("users").select("id, username, role").eq("id", user_id).execute()
-        if not result.data:
-            session.clear()
-            return jsonify({"success": False, "authenticated": False}), 401
-        user = result.data[0]
-        return jsonify({"success": True, "authenticated": True, "user_id": user["id"], "username": user["username"], "role": user.get("role", "human")})
-    except Exception:
-        return jsonify({"error": "Server xatosi"}), 500
-
 @app.route('/api/admin/stats', methods=['POST'])
 def admin_stats():
-    if session.get("role") != "admin": return jsonify({"error": "Ruxsat yo'q!"}), 403
-    if not supabase: return jsonify({"error": "Baza ulanmagan"}), 500
+    payload = get_jwt_payload()
+
+    if payload is None:
+        return jsonify({"error": "Authentication required"}), 401
+
+    if str(payload.get("sub")) != "admin" or payload.get("role") != "admin":
+        return jsonify({"error": "Admin huquqi yo'q"}), 403
+
+    if not supabase:
+        return jsonify({"error": "Baza ulanmagan"}), 500
     try:
         result = supabase.table("users").select("username").execute()
         users_list = [u["username"] for u in result.data] if result.data else []
@@ -193,6 +277,9 @@ def admin_stats():
 # ==========================================
 @app.route('/api/chat', methods=['POST'])
 def chat():
+    if not get_jwt_payload() and not session.get("user_id"):
+        return jsonify({"error": "Authentication required"}), 401
+
     data = request.json
     message = data.get('message')
     sys_prompt = data.get('systemPrompt', 'Sen foydali AI yordamchisan.')
@@ -233,7 +320,7 @@ def ai_login():
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
         response = make_request_with_retry(url, {}, payload)
         result = response.json()['candidates'][0]['content']['parts'][0]['text'].strip().upper()
-        if "PASS" in result:
+        if result == "PASS":
             session.clear()
             session["user_id"] = "ai_node"
             session["role"] = "ai"
@@ -248,6 +335,9 @@ def ai_login():
 # ==========================================
 @app.route('/api/search', methods=['GET'])
 def search():
+    if not get_jwt_payload() and not session.get("user_id"):
+        return jsonify({"error": "Authentication required"}), 401
+
     query = request.args.get("q", "").strip()
     if len(query) < 2: return jsonify({"success": False, "error": "Kamida 2 ta belgi kiriting."}), 400
     if len(query) > 200: return jsonify({"success": False, "error": "Juda uzun."}), 400
@@ -332,7 +422,7 @@ def handle_oauth_login(name, email, provider, provider_user_id, email_verified=F
 @app.route("/api/auth/google")
 def auth_google():
     if not os.environ.get("GOOGLE_CLIENT_ID") or not os.environ.get("GOOGLE_CLIENT_SECRET"):
-        return "Google OAuth sozlanmagan (Environment Variables yo'q)", 503
+        return "Google OAuth sozlanmagan", 503
     redirect_uri = url_for("auth_google_callback", _external=True)
     return google.authorize_redirect(redirect_uri)
 
@@ -341,6 +431,11 @@ def auth_google_callback():
     try:
         token = google.authorize_access_token()
         user_info = token.get("userinfo")
+        if not user_info:
+            try:
+                user_info = google.parse_id_token(token, None)
+            except Exception:
+                user_info = None
         if not user_info:
             return "Google user information missing", 400
         email = user_info.get("email")
@@ -361,7 +456,7 @@ def auth_google_callback():
 @app.route("/api/auth/github")
 def auth_github():
     if not os.environ.get("GITHUB_CLIENT_ID") or not os.environ.get("GITHUB_CLIENT_SECRET"):
-        return "GitHub OAuth sozlanmagan (Environment Variables yo'q)", 503
+        return "GitHub OAuth sozlanmagan", 503
     redirect_uri = url_for("auth_github_callback", _external=True)
     return github.authorize_redirect(redirect_uri)
 
