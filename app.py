@@ -14,7 +14,7 @@ from supabase import create_client, Client
 app = Flask(__name__)
 
 # ==========================================
-# SOZLAMALAR
+# SOZLAMALAR (patch 1, 2)
 # ==========================================
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
@@ -41,7 +41,7 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(days=7)
 )
 
-# CORS
+# CORS (patch 3)
 CORS(
     app,
     origins=["https://dasturchi-top-1.github.io"],
@@ -51,7 +51,7 @@ CORS(
 )
 
 # ==========================================
-# OAUTH KONFIGURATSIYASI
+# OAUTH KONFIGURATSIYASI (o'zgarmagan)
 # ==========================================
 oauth = OAuth(app)
 
@@ -74,7 +74,7 @@ github = oauth.register(
 )
 
 # ==========================================
-# YORDAMCHI FUNKSIYALAR
+# YORDAMCHI FUNKSIYALAR (patch 4, 5)
 # ==========================================
 def create_jwt(user_id, role):
     now = datetime.now(timezone.utc)
@@ -100,6 +100,39 @@ def get_jwt_payload():
         )
     except jwt.InvalidTokenError:
         return None
+
+
+def check_auth():
+    """GPT-6 tasdiqlagan strict auth (patch 6)."""
+    auth_header = request.headers.get("Authorization", "").strip()
+
+    # Authorization mavjud — FAQAT JWT (session bypass YO'Q)
+    if auth_header:
+        parts = auth_header.split(None, 1)
+
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return False, None, (
+                jsonify({"error": "Invalid authorization header"}), 401
+            )
+
+        payload = get_jwt_payload()
+
+        if not payload or not payload.get("sub"):
+            return False, None, (
+                jsonify({"error": "Invalid or expired token"}), 401
+            )
+
+        return True, payload["sub"], None
+
+    # Authorization yo'q — session
+    session_user = session.get("user_id")
+
+    if not session_user:
+        return False, None, (
+            jsonify({"error": "Authentication required"}), 401
+        )
+
+    return True, str(session_user), None
 
 
 def make_request_with_retry(url, headers, json_data, max_retries=3):
@@ -152,7 +185,7 @@ def login():
     if not username or not password: return jsonify({"error": "Ism va parolni kiriting"}), 400
     hashed = hashlib.sha256(password.encode()).hexdigest()
 
-    # Admin
+    # Admin (patch 7)
     if username == "admin" and hashed == ADMIN_HASH:
         token = create_jwt("admin", "admin")
         return jsonify({
@@ -171,7 +204,7 @@ def login():
                 return jsonify({"error": "OAuth orqali yaratilgan. Google yoki GitHub bilan kiring."}), 401
             if user["password_hash"] == hashed:
                 role = user.get("role", "human")
-                token = create_jwt(user["id"], role)
+                token = create_jwt(user["id"], role)  # patch 8
                 return jsonify({
                     "success": True,
                     "token": token,
@@ -184,7 +217,7 @@ def login():
 
 @app.route("/api/me", methods=["GET"])
 def current_user():
-    # 1. JWT (parol bilan kirganlar)
+    # Patch 9: JWT yoki session (dual auth)
     payload = get_jwt_payload()
     if payload:
         user_id = payload.get("sub")
@@ -213,7 +246,7 @@ def current_user():
         except Exception:
             return jsonify({"error": "Server xatosi"}), 500
 
-    # 2. Session (OAuth bilan kirganlar)
+    # Session (OAuth)
     user_id = session.get("user_id")
     if not user_id:
         return jsonify({"success": False, "authenticated": False}), 401
@@ -240,6 +273,7 @@ def current_user():
 
 @app.route('/api/verify-token', methods=['POST'])
 def verify_token():
+    # AI uchun session (o'zgarmagan)
     user_id = session.get("user_id")
     if not user_id: return jsonify({"valid": False}), 401
     if user_id == "admin" and session.get("role") == "admin":
@@ -255,14 +289,12 @@ def verify_token():
 
 @app.route('/api/admin/stats', methods=['POST'])
 def admin_stats():
+    # Patch 10: 401 vs 403 aniq
     payload = get_jwt_payload()
-
     if payload is None:
         return jsonify({"error": "Authentication required"}), 401
-
     if str(payload.get("sub")) != "admin" or payload.get("role") != "admin":
         return jsonify({"error": "Admin huquqi yo'q"}), 403
-
     if not supabase:
         return jsonify({"error": "Baza ulanmagan"}), 500
     try:
@@ -273,15 +305,22 @@ def admin_stats():
         return jsonify({"error": "Statistika olinmadi"}), 500
 
 # ==========================================
-# AI CHAT VA IMTOHON
+# AI CHAT (patch 11: strict auth + JSON validation)
 # ==========================================
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    if not get_jwt_payload() and not session.get("user_id"):
-        return jsonify({"error": "Authentication required"}), 401
+    ok, user_id, err = check_auth()
+    if not ok:
+        return err
 
-    data = request.json
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid JSON"}), 400
+
     message = data.get('message')
+    if not message or not isinstance(message, str):
+        return jsonify({"error": "Message required"}), 400
+
     sys_prompt = data.get('systemPrompt', 'Sen foydali AI yordamchisan.')
 
     if OPENROUTER_API_KEY:
@@ -311,6 +350,7 @@ def chat():
 
 @app.route('/api/ai-login', methods=['POST'])
 def ai_login():
+    # AI imtihon (session, o'zgarmagan)
     data = request.json
     answers = data.get('answers', [])
     if len(answers) < 30: return jsonify({"error": "30 ta savolga javob bering"}), 400
@@ -331,12 +371,13 @@ def ai_login():
         return jsonify({"error": str(e)}), 500
 
 # ==========================================
-# QIDIRUV
+# QIDIRUV (strict auth)
 # ==========================================
 @app.route('/api/search', methods=['GET'])
 def search():
-    if not get_jwt_payload() and not session.get("user_id"):
-        return jsonify({"error": "Authentication required"}), 401
+    ok, user_id, err = check_auth()
+    if not ok:
+        return err
 
     query = request.args.get("q", "").strip()
     if len(query) < 2: return jsonify({"success": False, "error": "Kamida 2 ta belgi kiriting."}), 400
@@ -350,7 +391,7 @@ def search():
         return jsonify({"success": False, "error": str(e)}), 502
 
 # ==========================================
-# OAUTH YORDAMCHI FUNKSIYASI
+# OAUTH YORDAMCHI FUNKSIYASI (o'zgarmagan)
 # ==========================================
 def handle_oauth_login(name, email, provider, provider_user_id, email_verified=False):
     if not supabase:
@@ -417,7 +458,7 @@ def handle_oauth_login(name, email, provider, provider_user_id, email_verified=F
         return "OAuth login failed", 500
 
 # ==========================================
-# GOOGLE OAUTH
+# GOOGLE OAUTH (o'zgarmagan)
 # ==========================================
 @app.route("/api/auth/google")
 def auth_google():
@@ -451,7 +492,7 @@ def auth_google_callback():
         return "Google login failed", 500
 
 # ==========================================
-# GITHUB OAUTH
+# GITHUB OAUTH (o'zgarmagan)
 # ==========================================
 @app.route("/api/auth/github")
 def auth_github():
