@@ -14,7 +14,7 @@ from supabase import create_client, Client
 app = Flask(__name__)
 
 # ==========================================
-# SOZLAMALAR (patch 1, 2)
+# SOZLAMALAR
 # ==========================================
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
@@ -41,7 +41,6 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(days=7)
 )
 
-# CORS (patch 3)
 CORS(
     app,
     origins=["https://dasturchi-top-1.github.io"],
@@ -51,7 +50,7 @@ CORS(
 )
 
 # ==========================================
-# OAUTH KONFIGURATSIYASI (o'zgarmagan)
+# OAUTH KONFIGURATSIYASI
 # ==========================================
 oauth = OAuth(app)
 
@@ -74,7 +73,7 @@ github = oauth.register(
 )
 
 # ==========================================
-# YORDAMCHI FUNKSIYALAR (patch 4, 5)
+# YORDAMCHI FUNKSIYALAR
 # ==========================================
 def create_jwt(user_id, role):
     now = datetime.now(timezone.utc)
@@ -103,20 +102,23 @@ def get_jwt_payload():
 
 
 def check_auth():
-    """GPT-6 tasdiqlagan strict auth (patch 6)."""
+    """Strict auth: Authorization mavjud bo'lsa faqat JWT, yo'q bo'lsa session."""
+    auth_present = "Authorization" in request.headers
     auth_header = request.headers.get("Authorization", "").strip()
 
-    # Authorization mavjud — FAQAT JWT (session bypass YO'Q)
-    if auth_header:
-        parts = auth_header.split(None, 1)
+    if auth_present:
+        if not auth_header:
+            return False, None, (
+                jsonify({"error": "Invalid authorization header"}), 401
+            )
 
+        parts = auth_header.split(None, 1)
         if len(parts) != 2 or parts[0].lower() != "bearer":
             return False, None, (
                 jsonify({"error": "Invalid authorization header"}), 401
             )
 
         payload = get_jwt_payload()
-
         if not payload or not payload.get("sub"):
             return False, None, (
                 jsonify({"error": "Invalid or expired token"}), 401
@@ -124,9 +126,7 @@ def check_auth():
 
         return True, payload["sub"], None
 
-    # Authorization yo'q — session
     session_user = session.get("user_id")
-
     if not session_user:
         return False, None, (
             jsonify({"error": "Authentication required"}), 401
@@ -185,7 +185,7 @@ def login():
     if not username or not password: return jsonify({"error": "Ism va parolni kiriting"}), 400
     hashed = hashlib.sha256(password.encode()).hexdigest()
 
-    # Admin (patch 7)
+    # Admin
     if username == "admin" and hashed == ADMIN_HASH:
         token = create_jwt("admin", "admin")
         return jsonify({
@@ -204,7 +204,7 @@ def login():
                 return jsonify({"error": "OAuth orqali yaratilgan. Google yoki GitHub bilan kiring."}), 401
             if user["password_hash"] == hashed:
                 role = user.get("role", "human")
-                token = create_jwt(user["id"], role)  # patch 8
+                token = create_jwt(user["id"], role)
                 return jsonify({
                     "success": True,
                     "token": token,
@@ -217,20 +217,36 @@ def login():
 
 @app.route("/api/me", methods=["GET"])
 def current_user():
-    # Patch 9: JWT yoki session (dual auth)
-    payload = get_jwt_payload()
-    if payload:
+    auth_present = "Authorization" in request.headers
+    auth_header = request.headers.get("Authorization", "").strip()
+
+    # 1. Authorization mavjud — FAQAT JWT (session bypass YO'Q)
+    if auth_present:
+        if not auth_header:
+            return jsonify({"success": False, "authenticated": False}), 401
+
+        parts = auth_header.split(None, 1)
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return jsonify({"success": False, "authenticated": False}), 401
+
+        payload = get_jwt_payload()
+        if not payload or not payload.get("sub"):
+            return jsonify({"success": False, "authenticated": False}), 401
+
         user_id = payload.get("sub")
         role = payload.get("role")
 
         if str(user_id) == "admin":
             if role != "admin":
                 return jsonify({"success": False, "authenticated": False}), 401
-            return jsonify({"success": True, "authenticated": True,
-                            "role": "admin", "username": "Admin"})
+            return jsonify({
+                "success": True, "authenticated": True,
+                "role": "admin", "username": "Admin"
+            })
 
         if not supabase:
             return jsonify({"error": "Baza ulanmagan"}), 500
+
         try:
             result = supabase.table("users").select("id, username, role").eq("id", user_id).execute()
             if not result.data:
@@ -246,17 +262,20 @@ def current_user():
         except Exception:
             return jsonify({"error": "Server xatosi"}), 500
 
-    # Session (OAuth)
+    # 2. Authorization umuman yo'q — session (OAuth)
     user_id = session.get("user_id")
     if not user_id:
         return jsonify({"success": False, "authenticated": False}), 401
 
     if user_id == "admin" and session.get("role") == "admin":
-        return jsonify({"success": True, "authenticated": True,
-                        "role": "admin", "username": "Admin"})
+        return jsonify({
+            "success": True, "authenticated": True,
+            "role": "admin", "username": "Admin"
+        })
 
     if not supabase:
         return jsonify({"error": "Baza ulanmagan"}), 500
+
     try:
         result = supabase.table("users").select("id, username, role").eq("id", user_id).execute()
         if not result.data:
@@ -289,7 +308,6 @@ def verify_token():
 
 @app.route('/api/admin/stats', methods=['POST'])
 def admin_stats():
-    # Patch 10: 401 vs 403 aniq
     payload = get_jwt_payload()
     if payload is None:
         return jsonify({"error": "Authentication required"}), 401
@@ -305,7 +323,7 @@ def admin_stats():
         return jsonify({"error": "Statistika olinmadi"}), 500
 
 # ==========================================
-# AI CHAT (patch 11: strict auth + JSON validation)
+# AI CHAT (strict auth + JSON validation)
 # ==========================================
 @app.route('/api/chat', methods=['POST'])
 def chat():
@@ -391,7 +409,7 @@ def search():
         return jsonify({"success": False, "error": str(e)}), 502
 
 # ==========================================
-# OAUTH YORDAMCHI FUNKSIYASI (o'zgarmagan)
+# OAUTH YORDAMCHI FUNKSIYASI
 # ==========================================
 def handle_oauth_login(name, email, provider, provider_user_id, email_verified=False):
     if not supabase:
@@ -458,7 +476,7 @@ def handle_oauth_login(name, email, provider, provider_user_id, email_verified=F
         return "OAuth login failed", 500
 
 # ==========================================
-# GOOGLE OAUTH (o'zgarmagan)
+# GOOGLE OAUTH
 # ==========================================
 @app.route("/api/auth/google")
 def auth_google():
@@ -492,7 +510,7 @@ def auth_google_callback():
         return "Google login failed", 500
 
 # ==========================================
-# GITHUB OAUTH (o'zgarmagan)
+# GITHUB OAUTH
 # ==========================================
 @app.route("/api/auth/github")
 def auth_github():
