@@ -1,192 +1,97 @@
-import hashlib
-import hmac
 import os
 import re
+import hmac
+import hashlib
 import secrets
-import time
-from collections import defaultdict, deque
+import logging
 from datetime import datetime, timedelta, timezone
 
 import requests
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, request, jsonify
 
+
+email_auth = Blueprint("email_auth", __name__)
 
 EMAIL_RE = re.compile(
-    r"^[A-Za-z0-9._%+\-]{1,64}@"
-    r"[A-Za-z0-9.\-]{1,190}\.[A-Za-z]{2,24}$"
+    r"^[A-Za-z0-9._%+-]{1,64}@"
+    r"[A-Za-z0-9.-]+\.[A-Za-z]{2,24}$"
 )
 CODE_RE = re.compile(r"^\d{6}$")
 
-CODE_TTL = 600
+OTP_TTL = 600
 MAX_ATTEMPTS = 5
-RESEND_COOLDOWN = 60
-MAX_EMAIL_PER_HOUR = 5
-
-IP_REQUEST_LIMIT = 20
-IP_VERIFY_LIMIT = 30
-
-_hits = defaultdict(deque)
+RESEND_SECONDS = 60
 
 
-def now_utc():
-    return datetime.now(timezone.utc)
-
-
-def iso(dt):
-    return dt.isoformat()
-
-
-def client_ip():
-    # Reverse proxy sozlamasi tekshirilmaguncha
-    # X-Forwarded-For qiymatiga ishonmaymiz.
-    return request.remote_addr or "unknown"
-
-
-def rate_allowed(key, limit, window):
-    now = time.monotonic()
-    hits = _hits[key]
-
-    while hits and now - hits[0] > window:
-        hits.popleft()
-
-    if len(hits) >= limit:
-        return False
-
-    hits.append(now)
-    return True
-
-
-def hash_code(secret_key, email, code):
-    message = f"{email}:{code}".encode("utf-8")
-
-    return hmac.new(
-        secret_key,
-        message,
-        hashlib.sha256
-    ).hexdigest()
-
-
-def send_code_email(to_email, code):
-    api_key = os.environ.get("BREVO_API_KEY")
-    sender = os.environ.get("MAIL_SENDER")
+def send_email_code(email, code):
+    api_key = os.getenv("BREVO_API_KEY")
+    sender = os.getenv("MAIL_SENDER")
 
     if not api_key or not sender:
-        raise RuntimeError("Brevo sozlanmagan")
-
-    html = f"""
-    <div style="font-family:Arial;padding:25px;
-                background:#0b0b1a;color:white">
-        <h2>Black AI</h2>
-        <p>Kirish uchun tasdiqlash kodingiz:</p>
-        <h1 style="letter-spacing:8px;color:#a5b4fc">
-            {code}
-        </h1>
-        <p>Kod 10 daqiqa amal qiladi.</p>
-        <p>Kodni hech kimga bermang.</p>
-    </div>
-    """
+        raise RuntimeError("Brevo sozlamalari mavjud emas")
 
     response = requests.post(
         "https://api.brevo.com/v3/smtp/email",
         headers={
             "api-key": api_key,
             "accept": "application/json",
-            "content-type": "application/json"
+            "content-type": "application/json",
         },
         json={
             "sender": {
                 "name": "Black AI",
-                "email": sender
+                "email": sender,
             },
-            "to": [{"email": to_email}],
+            "to": [{"email": email}],
             "subject": "Black AI — tasdiqlash kodi",
-            "htmlContent": html
+            "htmlContent": f"""
+                <div style="font-family:Arial;padding:24px">
+                    <h2>Black AI</h2>
+                    <p>Kirish kodingiz:</p>
+                    <h1 style="letter-spacing:8px">{code}</h1>
+                    <p>Kod 10 daqiqa amal qiladi.</p>
+                    <p>Ushbu kodni hech kimga bermang.</p>
+                </div>
+            """,
         },
-        timeout=15
+        timeout=15,
     )
 
     if response.status_code not in (200, 201, 202):
-        raise RuntimeError(
-            f"Brevo xatosi: {response.status_code}"
-        )
+        logging.error("Brevo xatosi: %s", response.status_code)
+        raise RuntimeError("Email yuborilmadi")
 
 
-def make_username(supabase, email):
-    base = re.sub(
-        r"[^a-z0-9]+",
-        "_",
-        email.split("@")[0].lower()
-    ).strip("_")[:20] or "user"
-
-    for _ in range(30):
-        suffix = secrets.token_hex(3)
-        username = f"{base}_{suffix}"
-
-        result = (
-            supabase.table("users")
-            .select("id")
-            .eq("username", username)
-            .limit(1)
-            .execute()
-        )
-
-        if not result.data:
-            return username
-
-    raise RuntimeError("Username yaratilmadi")
+def make_code_hash(secret, email, code):
+    message = f"{email}:{code}".encode()
+    return hmac.new(
+        secret.encode(),
+        message,
+        hashlib.sha256,
+    ).hexdigest()
 
 
-def init_email_auth(
-    app,
-    supabase,
-    create_jwt,
-    jwt_secret,
-    send_func=None
-):
+def init_email_auth(app, supabase, create_jwt, jwt_secret):
     if not jwt_secret:
         raise RuntimeError("JWT_SECRET mavjud emas")
 
-    blueprint = Blueprint("email_auth", __name__)
+    secret = hashlib.sha256(
+        ("black-ai-email:" + jwt_secret).encode()
+    ).hexdigest()
 
-    send = send_func or send_code_email
-
-    hmac_key = hashlib.sha256(
-        b"black-ai-email-otp:" + jwt_secret.encode()
-    ).digest()
-
-    def error(message, status=400):
-        return jsonify({
-            "success": False,
-            "error": message
-        }), status
-
-    def get_data():
-        data = request.get_json(silent=True)
-        return data if isinstance(data, dict) else {}
-
-    @blueprint.route(
-        "/api/auth/email/request",
-        methods=["POST"]
-    )
-    def email_request():
-        if not supabase:
-            return error("Database ulanmagan", 500)
-
-        data = get_data()
+    @email_auth.post("/api/auth/email/request")
+    def request_email_code():
+        data = request.get_json(silent=True) or {}
         email = str(data.get("email", "")).strip().lower()
 
         if len(email) > 254 or not EMAIL_RE.fullmatch(email):
-            return error("Email manzilini tekshiring")
-
-        ip = client_ip()
-
-        if not rate_allowed(
-            ("request", ip), IP_REQUEST_LIMIT, 600
-        ):
-            return error("Juda ko'p so'rov. Keyinroq urinib ko'ring.", 429)
+            return jsonify({
+                "success": False,
+                "error": "Email manzili noto'g'ri",
+            }), 400
 
         try:
-            now = now_utc()
+            now = datetime.now(timezone.utc)
 
             recent = (
                 supabase.table("email_otps")
@@ -194,14 +99,17 @@ def init_email_auth(
                 .eq("email", email)
                 .gte(
                     "created_at",
-                    iso(now - timedelta(hours=1))
+                    (now - timedelta(hours=1)).isoformat(),
                 )
                 .order("created_at", desc=True)
                 .execute()
             ).data or []
 
-            if len(recent) >= MAX_EMAIL_PER_HOUR:
-                return error("Soatlik limit tugadi.", 429)
+            if len(recent) >= 5:
+                return jsonify({
+                    "success": False,
+                    "error": "Soatlik limit tugadi",
+                }), 429
 
             if recent:
                 last = datetime.fromisoformat(
@@ -210,21 +118,15 @@ def init_email_auth(
                     )
                 )
 
-                remaining = (
-                    RESEND_COOLDOWN -
-                    (now - last).total_seconds()
-                )
-
-                if remaining > 0:
+                if (now - last).total_seconds() < RESEND_SECONDS:
                     return jsonify({
                         "success": False,
-                        "error": "Qayta yuborishdan oldin kuting.",
-                        "retry_after": int(remaining) + 1
+                        "error": "Qayta yuborish uchun kuting",
                     }), 429
 
             code = f"{secrets.randbelow(1000000):06d}"
 
-            # Avvalgi faol kodni bekor qilish.
+            # Oldingi kodlarni bekor qilish
             (
                 supabase.table("email_otps")
                 .update({"used": True})
@@ -233,29 +135,29 @@ def init_email_auth(
                 .execute()
             )
 
-            inserted = (
+            result = (
                 supabase.table("email_otps")
                 .insert({
                     "email": email,
-                    "code_hash": hash_code(
-                        hmac_key, email, code
+                    "code_hash": make_code_hash(
+                        secret, email, code
                     ),
                     "attempts": 0,
                     "used": False,
-                    "expires_at": iso(
-                        now + timedelta(seconds=CODE_TTL)
-                    )
+                    "expires_at": (
+                        now + timedelta(seconds=OTP_TTL)
+                    ).isoformat(),
                 })
                 .execute()
             )
 
-            if not inserted.data:
-                raise RuntimeError("OTP saqlanmadi")
+            if not result.data:
+                raise RuntimeError("Kod saqlanmadi")
 
-            otp_id = inserted.data[0]["id"]
+            otp_id = result.data[0]["id"]
 
             try:
-                send(email, code)
+                send_email_code(email, code)
             except Exception:
                 (
                     supabase.table("email_otps")
@@ -263,29 +165,25 @@ def init_email_auth(
                     .eq("id", otp_id)
                     .execute()
                 )
-                app.logger.exception("Brevo email xatosi")
-                return error("Email yuborilmadi.", 502)
+                raise
 
             return jsonify({
                 "success": True,
-                "message": "Agar email to'g'ri bo'lsa, kod yuborildi.",
-                "expires_in": CODE_TTL,
-                "resend_in": RESEND_COOLDOWN
+                "message": "Tasdiqlash kodi yuborildi",
+                "expires_in": OTP_TTL,
+                "resend_in": RESEND_SECONDS,
             })
 
         except Exception:
-            app.logger.exception("Email request xatosi")
-            return error("Server xatosi", 500)
+            app.logger.exception("Email kod yuborish xatosi")
+            return jsonify({
+                "success": False,
+                "error": "Email yuborishda xatolik",
+            }), 502
 
-    @blueprint.route(
-        "/api/auth/email/verify",
-        methods=["POST"]
-    )
-    def email_verify():
-        if not supabase:
-            return error("Database ulanmagan", 500)
-
-        data = get_data()
+    @email_auth.post("/api/auth/email/verify")
+    def verify_email_code():
+        data = request.get_json(silent=True) or {}
 
         email = str(data.get("email", "")).strip().lower()
         code = str(data.get("code", "")).strip()
@@ -295,17 +193,13 @@ def init_email_auth(
             or not EMAIL_RE.fullmatch(email)
             or not CODE_RE.fullmatch(code)
         ):
-            return error("Email yoki kod noto'g'ri")
-
-        ip = client_ip()
-
-        if not rate_allowed(
-            ("verify", ip), IP_VERIFY_LIMIT, 600
-        ):
-            return error("Juda ko'p urinish.", 429)
+            return jsonify({
+                "success": False,
+                "error": "Email yoki kod noto'g'ri",
+            }), 400
 
         try:
-            now = now_utc()
+            now = datetime.now(timezone.utc)
 
             rows = (
                 supabase.table("email_otps")
@@ -318,7 +212,10 @@ def init_email_auth(
             ).data or []
 
             if not rows:
-                return error("Kod noto'g'ri yoki muddati o'tgan")
+                return jsonify({
+                    "success": False,
+                    "error": "Kod noto'g'ri yoki muddati tugagan",
+                }), 400
 
             otp = rows[0]
 
@@ -326,22 +223,21 @@ def init_email_auth(
                 otp["expires_at"].replace("Z", "+00:00")
             )
 
-            if (
-                now > expires
-                or otp["attempts"] >= MAX_ATTEMPTS
-            ):
+            if now > expires or otp["attempts"] >= MAX_ATTEMPTS:
                 (
                     supabase.table("email_otps")
                     .update({"used": True})
                     .eq("id", otp["id"])
+                    .eq("used", False)
                     .execute()
                 )
 
-                return error("Kod noto'g'ri yoki muddati o'tgan")
+                return jsonify({
+                    "success": False,
+                    "error": "Kod muddati tugagan",
+                }), 400
 
-            expected = hash_code(
-                hmac_key, email, code
-            )
+            expected = make_code_hash(secret, email, code)
 
             if not hmac.compare_digest(
                 otp["code_hash"], expected
@@ -352,14 +248,16 @@ def init_email_auth(
                         "attempts": otp["attempts"] + 1
                     })
                     .eq("id", otp["id"])
+                    .eq("used", False)
                     .execute()
                 )
 
-                return error("Kod noto'g'ri yoki muddati o'tgan")
+                return jsonify({
+                    "success": False,
+                    "error": "Tasdiqlash kodi noto'g'ri",
+                }), 400
 
-            # Bu oddiy REST ketma-ketligi parallel so'rovlarga
-            # qarshi to'liq atomik emas. Productiondan oldin
-            # Supabase RPC orqali atomik tekshiruvga almashtiriladi.
+            # Kodni ishlatilgan deb belgilash
             claimed = (
                 supabase.table("email_otps")
                 .update({"used": True})
@@ -367,12 +265,16 @@ def init_email_auth(
                 .eq("used", False)
                 .select("id")
                 .execute()
-            ).data
+            ).data or []
 
             if not claimed:
-                return error("Kod allaqachon ishlatilgan")
+                return jsonify({
+                    "success": False,
+                    "error": "Kod allaqachon ishlatilgan",
+                }), 400
 
-            found = (
+            # Faqat emaili aniq tasdiqlangan hisobni topamiz.
+            users = (
                 supabase.table("users")
                 .select("id,username,role,email_verified")
                 .eq("email", email)
@@ -380,59 +282,68 @@ def init_email_auth(
                 .execute()
             ).data or []
 
-            if len(found) > 1:
-                app.logger.error(
-                    "Bir email bir nechta hisobga bog'langan"
-                )
-                return error("Hisobni tekshirish kerak.", 409)
+            if len(users) > 1:
+                return jsonify({
+                    "success": False,
+                    "error": "Hisobni qo'lda tekshirish kerak",
+                }), 409
 
-            is_new = not found
+            if users:
+                user = users[0]
 
-            if found:
-                user = found[0]
-
+                # Mavjud, ammo tasdiqlanmagan hisobni
+                # avtomatik egallashga yo'l qo'ymaymiz.
                 if not user.get("email_verified"):
-                    (
-                        supabase.table("users")
-                        .update({"email_verified": True})
-                        .eq("id", user["id"])
-                        .execute()
-                    )
+                    return jsonify({
+                        "success": False,
+                        "error": "Hisob emaili hali tasdiqlanmagan",
+                    }), 403
 
             else:
+                # OAuth hisoblarini email bo'yicha avtomatik
+                # bog'lamaymiz. Yangi email hisobi yaratiladi.
+                base = re.sub(
+                    r"[^a-z0-9]+",
+                    "_",
+                    email.split("@")[0].lower(),
+                ).strip("_")[:20] or "user"
+
+                username = f"{base}_{secrets.token_hex(3)}"
+
                 created = (
                     supabase.table("users")
                     .insert({
-                        "username": make_username(
-                            supabase, email
-                        ),
+                        "username": username,
                         "password_hash": None,
                         "email": email,
                         "email_verified": True,
-                        "role": "human"
+                        "role": "human",
                     })
                     .execute()
-                )
+                ).data or []
 
-                if not created.data:
-                    return error("Hisob yaratilmadi", 500)
+                if not created:
+                    raise RuntimeError("Foydalanuvchi yaratilmadi")
 
-                user = created.data[0]
+                user = created[0]
 
-            role = user.get("role") or "human"
-
-            token = create_jwt(user["id"], role)
+            token = create_jwt(
+                user["id"],
+                user.get("role") or "human",
+            )
 
             return jsonify({
                 "success": True,
                 "token": token,
-                "role": role,
+                "role": user.get("role") or "human",
                 "redirect": "multiverse.html",
-                "is_new": is_new
             })
 
         except Exception:
-            app.logger.exception("Email verify xatosi")
-            return error("Server xatosi", 500)
+            app.logger.exception("Email tasdiqlash xatosi")
+            return jsonify({
+                "success": False,
+                "error": "Server xatosi",
+            }), 500
 
-    app.register_blueprint(blueprint)
+    app.register_blueprint(email_auth)
