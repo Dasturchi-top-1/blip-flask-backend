@@ -11,7 +11,7 @@ from datetime import timedelta, datetime, timezone
 from ddgs import DDGS
 from supabase import create_client, Client
 
-# Email OTP
+# Email OTP (xato bo'lsa sayt yiqilmaydi, lekin Render logida ko'rinadi)
 try:
     from email_auth import init_email_auth
 except Exception as e:
@@ -19,8 +19,9 @@ except Exception as e:
     print("EMAIL_AUTH import xatosi:", repr(e), flush=True)
 
 app = Flask(__name__)
-
+# ==========================================
 # SOZLAMALAR
+# ==========================================
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
@@ -36,7 +37,6 @@ secret = os.environ.get("FLASK_SECRET_KEY")
 if not secret or len(secret) < 32:
     raise RuntimeError("FLASK_SECRET_KEY Render Environment'da sozlanmagan yoki juda qisqa!")
 app.secret_key = secret
-
 app.config.update(
     SESSION_COOKIE_NAME="blip_session",
     SESSION_COOKIE_HTTPONLY=True,
@@ -52,8 +52,9 @@ CORS(
     allow_headers=["Content-Type", "Authorization"],
     methods=["GET", "POST", "OPTIONS"]
 )
-
+# ==========================================
 # OAUTH KONFIGURATSIYASI
+# ==========================================
 oauth = OAuth(app)
 
 google = oauth.register(
@@ -63,7 +64,6 @@ google = oauth.register(
     server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
     client_kwargs={'scope': 'openid email profile'}
 )
-
 github = oauth.register(
     name='github',
     client_id=os.environ.get("GITHUB_CLIENT_ID"),
@@ -73,8 +73,9 @@ github = oauth.register(
     api_base_url='https://api.github.com/',
     client_kwargs={'scope': 'user:email'},
 )
-
+# ==========================================
 # YORDAMCHI FUNKSIYALAR
+# ==========================================
 def create_jwt(user_id, role):
     now = datetime.now(timezone.utc)
     payload = {
@@ -122,7 +123,6 @@ def check_auth():
             )
 
         return True, payload["sub"], None
-
     session_user = session.get("user_id")
     if not session_user:
         return False, None, (
@@ -146,14 +146,14 @@ def make_request_with_retry(url, headers, json_data, max_retries=3):
                 raise
             time.sleep(2 ** attempt)
     return response
-
+# ==========================================
 # ASOSIY ROUTE'LAR
+# ==========================================
 @app.route('/')
 def home():
     status = "Supabase ulangan OK" if supabase else "Supabase ULANMAGAN"
     oauth_status = "OAuth tayyor" if os.environ.get("GOOGLE_CLIENT_ID") else "OAuth sozlanmagan"
     return f"Blip Flask Backend ishlayapti! ({status}) ({oauth_status})"
-
 @app.route('/api/register', methods=['POST'])
 def register():
     return jsonify({"error": "Ro'yxatdan o'tish faqat Google yoki GitHub orqali."}), 410
@@ -172,7 +172,6 @@ def register():
         return jsonify({"success": True, "message": "Ro'yxatdan o'tdingiz!"})
     except Exception as e:
         return jsonify({"error": f"Baza xatosi: {str(e)}"}), 500
-
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json
@@ -180,7 +179,6 @@ def login():
     password = data.get('password', '')
     if not username or not password: return jsonify({"error": "Ism va parolni kiriting"}), 400
     hashed = hashlib.sha256(password.encode()).hexdigest()
-
     # Admin
     if username == "admin" and hashed == ADMIN_HASH:
         token = create_jwt("admin", "admin")
@@ -212,13 +210,12 @@ def login():
         return jsonify({"error": "Ism yoki parol xato!"}), 401
     except Exception as e:
         return jsonify({"error": f"Baza xatosi: {str(e)}"}), 500
-
 @app.route("/api/me", methods=["GET"])
 def current_user():
     auth_present = "Authorization" in request.headers
     auth_header = request.headers.get("Authorization", "").strip()
 
-    # 1. Authorization mavjud — FAQAT JWT
+    # 1. Authorization mavjud — FAQAT JWT (session bypass YO'Q)
     if auth_present:
         if not auth_header:
             return jsonify({"success": False, "authenticated": False}), 401
@@ -256,8 +253,7 @@ def current_user():
             })
         except Exception:
             return jsonify({"error": "Server xatosi"}), 500
-
-    # 2. Authorization umuman yo'q — session
+    # 2. Authorization umuman yo'q — session (OAuth)
     user_id = session.get("user_id")
     if not user_id:
         return jsonify({"success": False, "authenticated": False}), 401
@@ -283,9 +279,10 @@ def current_user():
         })
     except Exception:
         return jsonify({"error": "Server xatosi"}), 500
-        @app.route('/api/verify-token', methods=['POST'])
+        # MUHIM: @app.route chap chekkadan boshlanishi kerak!
+@app.route('/api/verify-token', methods=['POST'])
 def verify_token():
-    # AI uchun session
+    # AI uchun session (o'zgarmagan)
     user_id = session.get("user_id")
     if not user_id: return jsonify({"valid": False}), 401
     if user_id == "admin" and session.get("role") == "admin":
@@ -298,7 +295,6 @@ def verify_token():
         return jsonify({"valid": True, "role": result.data[0].get("role", "human")})
     except Exception:
         return jsonify({"valid": False}), 500
-
 @app.route('/api/admin/stats', methods=['POST'])
 def admin_stats():
     payload = get_jwt_payload()
@@ -314,8 +310,9 @@ def admin_stats():
         return jsonify({"success": True, "total_users": len(users_list), "users": users_list})
     except Exception:
         return jsonify({"error": "Statistika olinmadi"}), 500
-
-# AI CHAT
+# ==========================================
+# AI CHAT (strict auth + JSON validation)
+# ==========================================
 @app.route('/api/chat', methods=['POST'])
 def chat():
     ok, user_id, err = check_auth()
@@ -353,10 +350,9 @@ def chat():
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     return jsonify({"error": "AI kalitlari ishlamayapti"}), 500
-
 @app.route('/api/ai-login', methods=['POST'])
 def ai_login():
-    # AI imtihon
+    # AI imtihon (session, o'zgarmagan)
     data = request.json
     answers = data.get('answers', [])
     if len(answers) < 30: return jsonify({"error": "30 ta savolga javob bering"}), 400
@@ -375,8 +371,9 @@ def ai_login():
         return jsonify({"error": "Javoblar yetarli emas."}), 403
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-# QIDIRUV
+# ==========================================
+# QIDIRUV (strict auth)
+# ==========================================
 @app.route('/api/search', methods=['GET'])
 def search():
     ok, user_id, err = check_auth()
@@ -392,8 +389,9 @@ def search():
         return jsonify({"success": True, "query": query, "results": results})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 502
-
+# ==========================================
 # OAUTH YORDAMCHI FUNKSIYASI
+# ==========================================
 def handle_oauth_login(name, email, provider, provider_user_id, email_verified=False):
     if not supabase:
         return "Database unavailable", 500
@@ -452,15 +450,15 @@ def handle_oauth_login(name, email, provider, provider_user_id, email_verified=F
     except Exception:
         app.logger.exception("OAuth login failed")
         return "OAuth login failed", 500
-
+# ==========================================
 # GOOGLE OAUTH
+# ==========================================
 @app.route("/api/auth/google")
 def auth_google():
     if not os.environ.get("GOOGLE_CLIENT_ID") or not os.environ.get("GOOGLE_CLIENT_SECRET"):
         return "Google OAuth sozlanmagan", 503
     redirect_uri = url_for("auth_google_callback", _external=True)
     return google.authorize_redirect(redirect_uri)
-
 @app.route("/api/auth/google/callback")
 def auth_google_callback():
     try:
@@ -484,15 +482,15 @@ def auth_google_callback():
     except Exception:
         app.logger.exception("Google callback failed")
         return "Google login failed", 500
-
+# ==========================================
 # GITHUB OAUTH
+# ==========================================
 @app.route("/api/auth/github")
 def auth_github():
     if not os.environ.get("GITHUB_CLIENT_ID") or not os.environ.get("GITHUB_CLIENT_SECRET"):
         return "GitHub OAuth sozlanmagan", 503
     redirect_uri = url_for("auth_github_callback", _external=True)
     return github.authorize_redirect(redirect_uri)
-
 @app.route("/api/auth/github/callback")
 def auth_github_callback():
     try:
@@ -517,13 +515,15 @@ def auth_github_callback():
     except Exception:
         app.logger.exception("GitHub callback failed")
         return "GitHub login failed", 500
-
-# EMAIL OTP
+# ==========================================
+# EMAIL OTP (6 xonali kod bilan kirish)
+# ==========================================
 if init_email_auth is not None and supabase is not None:
     init_email_auth(app, supabase, create_jwt, JWT_SECRET)
 else:
     print("EMAIL_AUTH ulanmadi (modul yoki Supabase yo'q)", flush=True)
-
+# ==========================================
 # SERVERNI ISHGA TUSHIRISH
+# ==========================================
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
