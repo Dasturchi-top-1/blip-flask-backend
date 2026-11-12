@@ -180,8 +180,7 @@ def init_email_auth(app, supabase, create_jwt, jwt_secret):
                 "success": False,
                 "error": "Email yuborishda xatolik",
             }), 502
-
-    @email_auth.post("/api/auth/email/verify")
+            @email_auth.post("/api/auth/email/verify")
     def verify_email_code():
         data = request.get_json(silent=True) or {}
 
@@ -237,21 +236,25 @@ def init_email_auth(app, supabase, create_jwt, jwt_secret):
                     "error": "Kod muddati tugagan",
                 }), 400
 
+            # Urinishni OLDINDAN yozamiz. Bir vaqtda kelgan ko'p so'rov
+            # bir xil hisoblagichni o'qib, limitni aylanib o'tmasligi uchun.
+            bumped = (
+                supabase.table("email_otps")
+                .update({"attempts": otp["attempts"] + 1})
+                .eq("id", otp["id"])
+                .eq("attempts", otp["attempts"])
+                .execute()
+            ).data or []
+
+            if not bumped:
+                return jsonify({
+                    "success": False,
+                    "error": "Tasdiqlash kodi noto'g'ri",
+                }), 400
+
             expected = make_code_hash(secret, email, code)
 
-            if not hmac.compare_digest(
-                otp["code_hash"], expected
-            ):
-                (
-                    supabase.table("email_otps")
-                    .update({
-                        "attempts": otp["attempts"] + 1
-                    })
-                    .eq("id", otp["id"])
-                    .eq("used", False)
-                    .execute()
-                )
-
+            if not hmac.compare_digest(otp["code_hash"], expected):
                 return jsonify({
                     "success": False,
                     "error": "Tasdiqlash kodi noto'g'ri",
@@ -263,7 +266,6 @@ def init_email_auth(app, supabase, create_jwt, jwt_secret):
                 .update({"used": True})
                 .eq("id", otp["id"])
                 .eq("used", False)
-                .select("id")
                 .execute()
             ).data or []
 
