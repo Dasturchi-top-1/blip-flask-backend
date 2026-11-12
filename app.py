@@ -169,6 +169,7 @@ def home():
 
 @app.route('/api/register', methods=['POST'])
 def register():
+    return jsonify({"error": "Ro'yxatdan o'tish faqat Google yoki GitHub orqali."}), 410
     data = request.json
     username = data.get('username', '').strip().lower()
     password = data.get('password', '')
@@ -202,6 +203,9 @@ def login():
             "role": "admin",
             "redirect": "multiverse.html"
         })
+
+    # Oddiy foydalanuvchilar uchun parol bilan kirish o'chirilgan
+    return jsonify({"error": "Parol bilan kirish faqat admin uchun. Google yoki GitHub orqali kiring."}), 403
 
     if not supabase: return jsonify({"error": "Ma'lumotlar bazasi ulanmagan"}), 500
     try:
